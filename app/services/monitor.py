@@ -64,8 +64,9 @@ async def run_check_cycle():
         total = len(app_state.proxies)
         down_count = len(down_proxy_ids)
         failure_rate = down_count / total if total > 0 else 0.0
+        down_proxy_ids_sorted = sorted(down_proxy_ids)
 
-        await evaluate_alert(total, down_count, failure_rate, down_proxy_ids, now_iso)
+        await evaluate_alert(total, down_count, failure_rate, down_proxy_ids_sorted, now_iso)
 
 
 async def evaluate_alert(total: int, down_count: int, failure_rate: float, down_proxy_ids: list, now_iso: str):
