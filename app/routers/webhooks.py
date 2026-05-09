@@ -8,22 +8,23 @@ from app.models.schemas import WebhookRequest
 router = APIRouter(tags=["Webhooks"])
 
 
-@router.post("/webhooks", summary="Register a webhook URL to receive alerts")
+@router.post("/webhooks", status_code=201, summary="Register a webhook URL to receive alerts")
 async def add_webhook(body: WebhookRequest):
-    # Prevent duplicates for the same URL
+    webhook_id = f"wh-{uuid.uuid4().hex[:6]}"
+
     for wh in app_state.webhooks:
         if wh["url"] == body.url:
-            return {"message": "Webhook URL already registered.", "webhook": wh}
+            return {"webhook_id": wh["id"], "url": body.url, "message": "Webhook URL already registered."}
 
     record = {
-        "id": str(uuid.uuid4()),
+        "id": webhook_id,
         "url": body.url,
         "platform": body.platform or "generic",
         "secret": body.secret,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     app_state.webhooks.append(record)
-    return {"message": "Webhook registered.", "webhook": record}
+    return {"webhook_id": webhook_id, "url": body.url}
 
 
 @router.get("/webhooks", summary="List registered webhooks")

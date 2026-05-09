@@ -54,6 +54,9 @@ class WebhookRequest(BaseModel):
     platform: Optional[str] = "generic"   # "slack" | "discord" | "generic"
     secret: Optional[str] = None
 
+    class Config:
+        extra = "allow"
+
 
 class WebhookRecord(BaseModel):
     id: str
