@@ -83,12 +83,12 @@ GET  /config
 **Body:**
 ```json
 {
-  "check_interval": 15,
-  "proxy_timeout": 10
+  "check_interval_seconds": 15,
+  "request_timeout_ms": 3000
 }
 ```
-- `check_interval` — seconds between automatic check sweeps (min 5)
-- `proxy_timeout` — seconds before a proxy check times out (min 1)
+- `check_interval_seconds` — seconds between automatic check sweeps (min 5)
+- `request_timeout_ms` — timeout for each proxy check in milliseconds (min 1)
 
 ---
 
