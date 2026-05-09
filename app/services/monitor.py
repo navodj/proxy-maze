@@ -10,33 +10,31 @@ from app.services.webhook_dispatcher import dispatch_alert
 logger = logging.getLogger("watchtower.monitor")
 
 FAILURE_RATE_THRESHOLD = 0.20
-check_lock = asyncio.Lock()  # Prevents race conditions and duplicate alerts
+check_lock = asyncio.Lock()
 
-
-async def check_single_proxy(proxy_id: str, url: str, timeout: float) -> dict:
+async def check_single_proxy(client: httpx.AsyncClient, proxy_id: str, url: str) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), follow_redirects=True, verify=False) as client:
-            resp = await client.get(url)
-            status = "up" if 200 <= resp.status_code < 300 else "down"
+        resp = await client.get(url)
+        status = "up" if 200 <= resp.status_code < 300 else "down"
     except Exception:
         status = "down"
     return {"proxy_id": proxy_id, "status": status}
 
-
 async def run_check_cycle():
-    # The Lock ensures only one cycle can evaluate the pool at a time
     async with check_lock:
-        if not app_state.proxies:
+        if not getattr(app_state, "proxies", None):
             return
 
         timeout_sec = app_state.request_timeout_ms / 1000.0
 
-        tasks = {pid: asyncio.create_task(check_single_proxy(pid, p_data["url"], timeout_sec))
-                 for pid, p_data in app_state.proxies.items()}
+        # FIX: Use a single shared client for the entire cycle to prevent socket exhaustion!
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_sec), follow_redirects=True, verify=False) as client:
+            tasks = {pid: asyncio.create_task(check_single_proxy(client, pid, p_data["url"]))
+                     for pid, p_data in app_state.proxies.items()}
 
-        results = {}
-        for pid, task in tasks.items():
-            results[pid] = await task
+            results = {}
+            for pid, task in tasks.items():
+                results[pid] = await task
 
         app_state.total_checks_counter += len(results)
 
@@ -67,7 +65,6 @@ async def run_check_cycle():
 
         await evaluate_alert(total, down_count, failure_rate, down_proxy_ids, now_iso)
 
-
 async def evaluate_alert(total: int, down_count: int, failure_rate: float, down_proxy_ids: list, now_iso: str):
     if failure_rate >= FAILURE_RATE_THRESHOLD:
         if getattr(app_state, "alert_active", False) is False:
@@ -91,9 +88,19 @@ async def evaluate_alert(total: int, down_count: int, failure_rate: float, down_
                 app_state.alerts = []
             app_state.alerts.append(alert_record)
 
-            payload = {"event": "alert.fired"}
-            payload.update(alert_record)
-            asyncio.create_task(dispatch_alert(payload))
+            # FIX: Explicitly format payload to match strict JSON schema rules
+            payload = {
+                "event": "alert.fired",
+                "alert_id": alert_record["alert_id"],
+                "fired_at": alert_record["fired_at"],
+                "failure_rate": alert_record["failure_rate"],
+                "total_proxies": alert_record["total_proxies"],
+                "failed_proxies": alert_record["failed_proxies"],
+                "failed_proxy_ids": alert_record["failed_proxy_ids"],
+                "threshold": alert_record["threshold"],
+                "message": alert_record["message"]
+            }
+            asyncio.create_task(dispatch_alert(payload, "alert.fired"))
 
     else:
         if getattr(app_state, "alert_active", False) is True:
@@ -114,8 +121,7 @@ async def evaluate_alert(total: int, down_count: int, failure_rate: float, down_
                     "alert_id": resolved_alert["alert_id"],
                     "resolved_at": resolved_alert["resolved_at"]
                 }
-                asyncio.create_task(dispatch_alert(payload))
-
+                asyncio.create_task(dispatch_alert(payload, "alert.resolved"))
 
 async def monitoring_loop():
     while True:
