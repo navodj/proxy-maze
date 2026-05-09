@@ -1,17 +1,20 @@
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 
 
 # ---------- Config ----------
 class ConfigRequest(BaseModel):
-    check_interval: Optional[int] = None   # seconds
-    proxy_timeout: Optional[int] = None    # seconds
+    check_interval_seconds: Optional[int] = None
+    request_timeout_ms: Optional[int] = None
+    # Backward compatibility keys
+    check_interval: Optional[int] = None
+    proxy_timeout: Optional[int] = None
 
 
 class ConfigResponse(BaseModel):
-    check_interval: int
-    proxy_timeout: int
+    check_interval_seconds: int
+    request_timeout_ms: int
 
 
 # ---------- Proxies ----------
@@ -21,6 +24,7 @@ class ProxyItem(BaseModel):
 
 class ProxyListRequest(BaseModel):
     proxies: List[str]
+    replace: Optional[bool] = False
 
 
 class ProxyRecord(BaseModel):
@@ -53,9 +57,6 @@ class WebhookRequest(BaseModel):
     url: str
     platform: Optional[str] = "generic"   # "slack" | "discord" | "generic"
     secret: Optional[str] = None
-
-    class Config:
-        extra = "allow"
 
 
 class WebhookRecord(BaseModel):

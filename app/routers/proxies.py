@@ -19,7 +19,7 @@ async def add_proxies(body: ProxyListRequest):
     Upload a list of proxy URLs. Replaces the pool if requested.
     """
     # 1. Handle the "replace" flag as required by the brief
-    if getattr(body, "replace", False):
+    if body.replace:
         app_state.proxies.clear()
 
     accepted_proxies = []
