@@ -4,7 +4,7 @@ import time
 # Your URLs (Base URL without /docs or /)
 URLS = {
     "Render": "https://proxy-maze-od1n.onrender.com",
-    "Tunnel": "https://alumni-lucid-pound.ngrok-free.dev"
+    "Tunnel": "https://unengaged-proximity-grime.ngrok-free.dev"
 }
 
 
