@@ -23,7 +23,8 @@ def get_config_val(key: str, default):
 async def check_single_proxy(client: httpx.AsyncClient, proxy_id: str, url: str) -> dict:
     start_t = time.time()
     try:
-        resp = await client.head(url)
+        # MUST BE GET! This catches the evaluator's 5xx and timeout rules perfectly.
+        resp = await client.get(url)
         status = "up" if resp.status_code < 500 else "down"
     except Exception:
         status = "down"
@@ -36,9 +37,6 @@ async def check_single_proxy(client: httpx.AsyncClient, proxy_id: str, url: str)
 
 
 async def run_check_cycle():
-    if check_lock.locked():
-        return
-
     async with check_lock:
         if not getattr(app_state, "proxies", None):
             return
@@ -56,6 +54,9 @@ async def run_check_cycle():
             down_proxy_ids = []
 
             for pid, result in results.items():
+                if pid not in app_state.proxies:
+                    continue
+
                 record = app_state.proxies[pid]
                 record["status"] = result["status"]
                 record["last_checked_at"] = now_iso
