@@ -2,70 +2,86 @@ import asyncio
 import httpx
 import logging
 import uuid
+import time
 from datetime import datetime, timezone
-
 from app.core.state import app_state
 from app.services.webhook_dispatcher import dispatch_alert
 
 logger = logging.getLogger("watchtower.monitor")
-
 FAILURE_RATE_THRESHOLD = 0.20
-check_lock = asyncio.Lock()  # Prevents race conditions and duplicate alerts
+check_lock = asyncio.Lock()
 
 
-async def check_single_proxy(proxy_id: str, url: str, timeout: float) -> dict:
+def get_config_val(key: str, default):
+    if hasattr(app_state, "current_config"):
+        val = getattr(app_state.current_config, key, None)
+        if val is not None:
+            return val
+    return getattr(app_state, key, default)
+
+
+async def check_single_proxy(client: httpx.AsyncClient, proxy_id: str, url: str) -> dict:
+    start_t = time.time()
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), follow_redirects=True, verify=False) as client:
-            resp = await client.get(url)
-            status = "up" if 200 <= resp.status_code < 300 else "down"
+        resp = await client.head(url)
+        status = "up" if resp.status_code < 500 else "down"
     except Exception:
         status = "down"
-    return {"proxy_id": proxy_id, "status": status}
+
+    return {
+        "proxy_id": proxy_id,
+        "status": status,
+        "response_time_ms": round((time.time() - start_t) * 1000, 2)
+    }
 
 
 async def run_check_cycle():
-    # The Lock ensures only one cycle can evaluate the pool at a time
+    if check_lock.locked():
+        return
+
     async with check_lock:
-        if not app_state.proxies:
+        if not getattr(app_state, "proxies", None):
             return
 
-        timeout_sec = app_state.request_timeout_ms / 1000.0
+        try:
+            timeout_sec = get_config_val("request_timeout_ms", 3000) / 1000.0
 
-        tasks = {pid: asyncio.create_task(check_single_proxy(pid, p_data["url"], timeout_sec))
-                 for pid, p_data in app_state.proxies.items()}
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_sec), verify=False,
+                                         follow_redirects=True) as client:
+                tasks = {pid: asyncio.create_task(check_single_proxy(client, pid, p_data["url"]))
+                         for pid, p_data in app_state.proxies.items()}
+                results = {pid: await task for pid, task in tasks.items()}
 
-        results = {}
-        for pid, task in tasks.items():
-            results[pid] = await task
+            now_iso = datetime.now(timezone.utc).isoformat()
+            down_proxy_ids = []
 
-        app_state.total_checks_counter += len(results)
+            for pid, result in results.items():
+                record = app_state.proxies[pid]
+                record["status"] = result["status"]
+                record["last_checked_at"] = now_iso
+                record["response_time_ms"] = result["response_time_ms"]
+                record["total_checks"] = record.get("total_checks", 0) + 1
 
-        now_iso = datetime.now(timezone.utc).isoformat()
-        down_proxy_ids = []
+                if result["status"] == "down":
+                    record["consecutive_failures"] = record.get("consecutive_failures", 0) + 1
+                    down_proxy_ids.append(pid)
+                else:
+                    record["consecutive_failures"] = 0
 
-        for pid, result in results.items():
-            record = app_state.proxies[pid]
-            record["status"] = result["status"]
-            record["last_checked_at"] = now_iso
-            record["total_checks"] = record.get("total_checks", 0) + 1
+                history = record.setdefault("history", [])
+                history.append({"checked_at": now_iso, "status": result["status"]})
 
-            if result["status"] == "down":
-                record["consecutive_failures"] = record.get("consecutive_failures", 0) + 1
-                down_proxy_ids.append(pid)
-            else:
-                record["consecutive_failures"] = 0
+                up_checks = sum(1 for entry in history if entry["status"] == "up")
+                record["uptime_percentage"] = round((up_checks / record["total_checks"]) * 100, 1)
 
-            history = record.setdefault("history", [])
-            history.append({"checked_at": now_iso, "status": result["status"]})
+            total = len(app_state.proxies)
+            down_count = len(down_proxy_ids)
+            failure_rate = down_count / total if total > 0 else 0.0
 
-            up_checks = sum(1 for entry in history if entry["status"] == "up")
-            record["uptime_percentage"] = round((up_checks / record["total_checks"]) * 100, 1)
+            await evaluate_alert(total, down_count, failure_rate, down_proxy_ids, now_iso)
 
-        total = len(app_state.proxies)
-        down_count = len(down_proxy_ids)
-        failure_rate = down_count / total if total > 0 else 0.0
-
-        await evaluate_alert(total, down_count, failure_rate, down_proxy_ids, now_iso)
+        except Exception as e:
+            logger.error(f"Check cycle error: {e}")
 
 
 async def evaluate_alert(total: int, down_count: int, failure_rate: float, down_proxy_ids: list, now_iso: str):
@@ -91,16 +107,25 @@ async def evaluate_alert(total: int, down_count: int, failure_rate: float, down_
                 app_state.alerts = []
             app_state.alerts.append(alert_record)
 
-            payload = {"event": "alert.fired"}
-            payload.update(alert_record)
-            asyncio.create_task(dispatch_alert(payload))
+            payload = {
+                "event": "alert.fired",
+                "alert_id": alert_record["alert_id"],
+                "fired_at": alert_record["fired_at"],
+                "failure_rate": alert_record["failure_rate"],
+                "total_proxies": alert_record["total_proxies"],
+                "failed_proxies": alert_record["failed_proxies"],
+                "failed_proxy_ids": alert_record["failed_proxy_ids"],
+                "threshold": alert_record["threshold"],
+                "message": alert_record["message"]
+            }
+            asyncio.create_task(dispatch_alert(payload, "alert.fired"))
 
     else:
         if getattr(app_state, "alert_active", False) is True:
             app_state.alert_active = False
 
             resolved_alert = None
-            if hasattr(app_state, "alerts") and app_state.alerts:
+            if hasattr(app_state, "alerts"):
                 for a in reversed(app_state.alerts):
                     if a.get("status") == "active":
                         a["status"] = "resolved"
@@ -114,7 +139,7 @@ async def evaluate_alert(total: int, down_count: int, failure_rate: float, down_
                     "alert_id": resolved_alert["alert_id"],
                     "resolved_at": resolved_alert["resolved_at"]
                 }
-                asyncio.create_task(dispatch_alert(payload))
+                asyncio.create_task(dispatch_alert(payload, "alert.resolved"))
 
 
 async def monitoring_loop():
@@ -126,8 +151,7 @@ async def monitoring_loop():
         except Exception as exc:
             logger.exception("Unexpected error in monitoring loop: %s", exc)
 
-        interval = app_state.check_interval_seconds
-
+        interval = get_config_val("check_interval_seconds", 15)
         try:
             await asyncio.sleep(interval)
         except asyncio.CancelledError:
